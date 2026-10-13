@@ -14,7 +14,13 @@
 
 ## Abstract
 
-This work presents Rex, a reinforcement learning framework for servo-actuated, SpotMicro-class quadruped locomotion built on NVIDIA Isaac Lab's GPU-accelerated simulation platform. The project originated as a from-scratch kinematic simulator running on a Raspberry Pi 4B, using Pygame to validate 12-DOF forward kinematics, joint-limit constraints, and gait sequencing before scaling into large-scale parallel RL training. Extending Isaac Lab's ANYmal-based velocity-tracking pipeline, Rex integrates a custom actuator model for 12 MG996R servo motors that captures torque-speed saturation, backlash, and discretization effects characteristic of low-cost hardware. Six Gym-registered environments support flat-terrain and rough-terrain velocity tracking as well as static balance tasks, each with corresponding deterministic evaluation variants. A key contribution is the identification and correction of a terrain-scale mismatch: standard Isaac Lab rough-terrain generation, calibrated for full-size platforms, produces obstacle geometries that exceed the SpotMicro's leg stroke and workspace envelope, causing self-collision, Jacobian singularities, and actuator saturation. A customized terrain curriculum, bounded by the platform's kinematic and stability limits and validated against the embedded Pygame model, resolves this mismatch. Prior to hardware deployment, trained policies undergo systematic sim-to-sim validation, exported via ONNX and re-evaluated in PyBullet on a Jetson Orin Nano, to isolate physics-engine discrepancies from sim-to-real transfer failures. Results demonstrate robust flat-terrain locomotion under domain randomization and consistent behavior across simulation platforms, establishing a validated pipeline toward physical deployment.
+Rex is a reinforcement-learning framework for a 12-DOF, MG996R-actuated SpotMicro-class quadruped, built on NVIDIA Isaac Lab. The project adapts a velocity-tracking locomotion pipeline to a small, low-cost servo-actuated platform and examines how platform-scale kinematic constraints affect training, actuation modeling, and deployment.
+
+The project originated as a from-scratch Pygame kinematic simulator running on a Raspberry Pi 4B, used to validate 12-DOF forward kinematics, joint-limit constraints, and gait sequencing before scaling to GPU-accelerated reinforcement-learning training. In Isaac Lab, Rex uses flat-terrain velocity-tracking environments with deterministic evaluation variants, domain randomization, observation corruption, and an MG996R-inspired actuation configuration.
+
+A central motivation is the mismatch between general-purpose rough-terrain locomotion settings and the Rex platform’s limited leg stroke, ground clearance, and actuator envelope. The project therefore treats terrain feasibility as a platform-dependent design problem rather than assuming that policies trained for larger quadrupeds transfer directly to a small servo-actuated system.
+
+Trained policies are exported through ONNX and evaluated in PyBullet to investigate policy-export, observation-interface, and physics-engine differences prior to hardware deployment. The repository also includes an STM32-based deployment interface for the physical robot, including servo calibration, joint-limit clipping, communication watchdog behavior, and a safe-pose recovery routine.
 
 ---
 
@@ -35,10 +41,20 @@ This stage served as the architectural and kinematic foundation for the project:
 
 ## Overview
 
-**Rex** is a custom manager-based reinforcement learning task extension for [Isaac Lab](https://isaac-sim.github.io/IsaacLab/) that integrates a servo-actuated SpotMicro-class quadruped (https://spotmicroai.readthedocs.io/en/latest/) into NVIDIA's GPU-accelerated physics simulation framework. Built atop Isaac Lab's velocity-tracking locomotion pipeline, Rex enables large-scale parallel training of robust, terrain-adaptive gaits under comprehensive domain randomization, with a formal sim-to-sim validation pipeline isolating physics-engine discrepancies from policy-level failures.
+Rex is a custom manager-based reinforcement-learning task extension for [Isaac Lab](https://isaac-sim.github.io/IsaacLab/). It adapts Isaac Lab’s velocity-tracking locomotion pipeline to a servo-actuated SpotMicro-class quadruped represented by a customized `spot2.usd` asset.
 
-The robot asset (`spot2.usd`) is customized after the open-source SpotMicro platform and actuated by 12 MG996R servo motors, with actuator dynamics modeled to capture torque-speed saturation, backlash, and discretization effects inherent to low-cost servo hardware.
+The platform is actuated by twelve MG996R servos. Rather than treating the actuators as ideal torque sources, Rex uses Isaac Lab’s DC-motor actuator model to represent a nominal MG996R-inspired torque-speed saturation envelope.
 
+The repository supports:
+
+- Large-scale parallel policy training in Isaac Lab.
+- Deterministic policy evaluation.
+- Domain randomization and observation corruption.
+- ONNX policy export.
+- PyBullet-based cross-simulator inference.
+- STM32-based low-level hardware deployment.
+
+The project is intended as a simulation-to-cross-simulator validation pipeline preceding physical deployment.
 <!-- TODO: Add side-by-side sim vs. real photo here -->
 <div align="center">
 
@@ -100,7 +116,6 @@ Six Gym-registered tasks provide a complete training-to-deployment lifecycle spa
 ---
 
 ## System Architecture
-
 The overall Rex training, simulation, validation, and hardware deployment
 pipeline is shown below.
 
@@ -131,6 +146,137 @@ rex/
     ├── skrl_flat_ppo_cfg.yaml
     └── skrl_rough_ppo_cfg.yaml
 ```
+
+---
+
+## Actuation Model
+
+Rex uses Isaac Lab’s `DCMotorCfg` to represent the MG996R servo actuators as DC-motor-like joints with a torque-speed saturation envelope.
+
+The MG996R is specified by TowerPro to provide approximately 1.1 N·m of stall torque at 6 V and 0.15 s per 60° of no-load motion at 6 V. The Isaac Lab configuration uses a 1.1 N·m effort limit and a 6.0 rad/s no-load velocity limit.
+
+Isaac Lab’s DC-motor actuator model applies a linear torque-speed saturation curve: available joint effort decreases from the stall-torque limit at zero velocity to zero at the no-load velocity limit. This prevents the policy from receiving unrealistic torque at high joint velocities and creates a more representative actuation envelope for a low-cost servo platform.
+
+### Actuator Parameters
+
+| Parameter | Value | Interpretation |
+|---|---:|---|
+| `saturation_effort` | 1.1 N·m | Nominal MG996R stall torque at 6 V |
+| `effort_limit` | 1.1 N·m | Upper bound on computed joint effort |
+| `velocity_limit` | 6.0 rad/s | Conservative no-load joint-speed estimate |
+| `stiffness` | 25 N·m/rad | PD position gain used by the actuator model |
+| `damping` | 0.5 N·m·s/rad | PD velocity damping |
+| `armature` | 0.01 kg·m² | Added joint-space inertia for numerical stability |
+
+The PD gains and armature value are simulation and control parameters selected for stable training within the modeled actuation envelope. They are not intrinsic MG996R datasheet specifications.
+
+### Modeling Scope
+
+The current configuration models torque-speed saturation. It does not model gear backlash, PWM command quantization, communication delay, servo internal control-loop dynamics, load-dependent servo behavior, or thermal derating.
+
+These effects remain potential sources of unmodeled sim-to-real mismatch.
+
+### Model-Consistency Note
+
+The current URDF specifies 100 N·m joint-effort limits and 0.5–0.7 rad/s velocity limits, while the Isaac Lab actuator configuration overrides these with a 1.1 N·m effort limit and 6.0 rad/s velocity limit.
+
+The Isaac Lab actuator configuration is intended to represent the MG996R servo’s nominal torque-speed envelope. The URDF limits should be updated for consistency, or the difference should be explicitly retained as a simulation-only actuation model.
+
+Until this inconsistency is resolved, saturation and tracking behavior should be interpreted in terms of the Isaac Lab actuator configuration rather than the URDF joint limits.
+
+---
+
+## Domain Randomization
+
+The flat-terrain training configuration randomizes physical, actuation, initial-state, and disturbance parameters to improve robustness to model mismatch and deployment variation.
+
+| Randomization | Range / setting | Mode | Motivation |
+|---|---:|---|---|
+| Rigid-body mass | 0.8–1.2× nominal | Reset | Payload, battery, and assembly variation |
+| Base center of mass | ±3.5 cm in x, y, z | Reset | Assembly tolerance and payload placement |
+| Static/dynamic friction | 0.65–1.35× nominal | Reset | Surface and contact variation |
+| Joint friction | 0.85–1.15× nominal | Reset | Gear wear and temperature effects |
+| Joint armature | 0.85–1.15× nominal | Reset | Unmodeled inertia and actuator variation |
+| Actuator stiffness | 0.85–1.15× nominal | Reset | Servo and control-model mismatch |
+| Actuator damping | 0.85–1.15× nominal | Reset | Servo and control-model mismatch |
+| Initial joint position | ±0.04 rad offset | Reset | Reset and assembly variation |
+| Initial joint velocity | ±0.1 rad/s | Reset | Initial-state variation |
+| External velocity perturbation | X: ±0.15 m/s; Y: ±0.1 m/s; yaw: ±0.15 rad/s | Interval, 10–15 s | Disturbances and interaction |
+| Action delay | 1–2 simulation steps | Reset | Communication and control latency |
+
+Action delay is included when supported by the installed Isaac Lab version. It introduces a one- to two-step delay between policy actions and environment execution.
+
+The randomization ranges are engineering choices intended to cover plausible variation in a low-cost servo platform. They are not yet derived from a systematic hardware-characterization campaign.
+
+---
+
+## Observation Noise
+
+Proprioceptive observations are corrupted during training to reduce reliance on idealized sensor measurements.
+
+| Observation | Noise model | Range |
+|---|---|---:|
+| Base linear velocity | Additive uniform | ±0.2 m/s |
+| Base angular velocity | Additive uniform | ±0.15 rad/s |
+| Projected gravity | Additive uniform | ±0.1 |
+| Joint position | Additive uniform | ±0.03 rad |
+| Joint velocity | Not corrupted in the canonical flat configuration | — |
+
+Observation corruption is disabled in `RexFlatEnvCfg_PLAY` to provide deterministic evaluation conditions.
+
+---
+
+## Reward Design
+
+The flat-terrain reward combines velocity tracking, gait timing, posture, smoothness, energy, and contact penalties. The weights were selected to prioritize command tracking while discouraging hopping, excessive joint acceleration, actuator effort, and base contact.
+
+| Reward term | Weight | Purpose |
+|---|---:|---|
+| `track_lin_vel_xy_exp` | 20.0 | Track commanded XY velocity |
+| `track_ang_vel_z_exp` | 8.0 | Track commanded yaw rate |
+| `feet_air_time` | 40.0 | Encourage swing-phase timing |
+| `base_height_l2` | -3.0 | Maintain 0.17 m target height |
+| `flat_orientation_l2` | -15.0 | Discourage base tilt |
+| `lin_vel_z_l2` | -3.0 | Discourage vertical bouncing |
+| `dof_acc_l2` | -2.5e-7 | Penalize joint acceleration |
+| `action_rate_l2` | -0.01 | Penalize abrupt actions |
+| `joint_vel_l2` | -0.1 | Penalize excessive joint speed |
+| `dof_torques_l2` | -1.0e-5 | Penalize actuator effort |
+| `survival` | 0.0 | Disabled in the canonical flat configuration |
+
+The reward configuration is empirical and platform-specific. It has not been subjected to a systematic hyperparameter sweep.
+
+---
+
+## Training Configuration
+
+Policies are trained using RL-Games PPO with an actor-critic network.
+
+| Parameter | Value |
+|---|---:|
+| Algorithm | PPO |
+| RL framework | RL-Games |
+| Network | Actor-critic MLP |
+| Hidden units | 512, 256, 128 |
+| Activation | ELU |
+| Seed | 42 |
+| Maximum epochs | 1500 |
+| Horizon length | 24 |
+| Mini-batch size | 24576 |
+| Mini-epochs | 5 |
+| Learning rate | 1e-3 |
+| Learning-rate schedule | Adaptive |
+| Target KL divergence | 0.01 |
+| PPO clipping parameter | 0.2 |
+| Discount factor | 0.99 |
+| GAE parameter | 0.95 |
+| Entropy coefficient | 0.005 |
+| Gradient norm | 1.0 |
+| Reward scale | 0.6 |
+| Mixed precision | Enabled |
+| Value normalization | Enabled |
+
+The provided configuration was adapted from an Isaac Lab ANYmal C rough-terrain configuration. It is not an unmodified ANYmal C policy or training setup.
 
 ---
 
