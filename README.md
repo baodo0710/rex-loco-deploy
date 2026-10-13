@@ -170,20 +170,6 @@ Isaac Lab’s DC-motor actuator model applies a linear torque-speed saturation c
 
 The PD gains and armature value are simulation and control parameters selected for stable training within the modeled actuation envelope. They are not intrinsic MG996R datasheet specifications.
 
-### Modeling Scope
-
-The current configuration models torque-speed saturation. It does not model gear backlash, PWM command quantization, communication delay, servo internal control-loop dynamics, load-dependent servo behavior, or thermal derating.
-
-These effects remain potential sources of unmodeled sim-to-real mismatch.
-
-### Model-Consistency Note
-
-The current URDF specifies 100 N·m joint-effort limits and 0.5–0.7 rad/s velocity limits, while the Isaac Lab actuator configuration overrides these with a 1.1 N·m effort limit and 6.0 rad/s velocity limit.
-
-The Isaac Lab actuator configuration is intended to represent the MG996R servo’s nominal torque-speed envelope. The URDF limits should be updated for consistency, or the difference should be explicitly retained as a simulation-only actuation model.
-
-Until this inconsistency is resolved, saturation and tracking behavior should be interpreted in terms of the Isaac Lab actuator configuration rather than the URDF joint limits.
-
 ---
 
 ## Domain Randomization
@@ -221,8 +207,6 @@ Proprioceptive observations are corrupted during training to reduce reliance on 
 | Projected gravity | Additive uniform | ±0.1 |
 | Joint position | Additive uniform | ±0.03 rad |
 | Joint velocity | Not corrupted in the canonical flat configuration | — |
-
-Observation corruption is disabled in `RexFlatEnvCfg_PLAY` to provide deterministic evaluation conditions.
 
 ---
 
